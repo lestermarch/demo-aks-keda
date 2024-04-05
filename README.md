@@ -18,7 +18,8 @@ az group create \
 2. Create a storage account and queue:
 
 ```azurecli
-ENTROPY=$(echo $RG_ID | sha256sum | cut -c1-8)
+RESOURCE_GROUP_ID=$(az group show --name $RESOURCE_GROUP_NAME --query id -o tsv)
+ENTROPY=$(echo $RESOURCE_GROUP_ID | sha256sum | cut -c1-8)
 STORAGE_ACCOUNT_NAME="stakskedademo$ENTROPY"
 STORAGE_QUEUE_NAME="demo"
 
@@ -113,6 +114,7 @@ az identity create \
   --location $LOCATION
 
 WORKLOAD_IDENTITY_CLIENT_ID=$(az identity show --name $WORKLOAD_IDENTITY_NAME --resource-group $RESOURCE_GROUP_NAME --query clientId -o tsv)
+WORKLOAD_IDENTITY_TENANT_ID=$(az identity show --name $WORKLOAD_IDENTITY_NAME --resource-group $RESOURCE_GROUP_NAME --query tenantId -o tsv)
 
 cat <<EOF | kubectl apply -f -
 apiVersion: v1
@@ -120,20 +122,29 @@ kind: ServiceAccount
 metadata:
   annotations:
     azure.workload.identity/client-id: "${WORKLOAD_IDENTITY_CLIENT_ID}"
+    azure.workload.identity/tenant-id: "${WORKLOAD_IDENTITY_TENANT_ID}"
   name: "${WORKLOAD_IDENTITY_NAME}"
   namespace: "${NAMESPACE}"
 EOF
 
 az identity federated-credential create \
-  --name "fid-$WORKLOAD_IDENTITY_NAME" \
+  --name "aks-sa-$WORKLOAD_IDENTITY_NAME" \
   --resource-group $RESOURCE_GROUP_NAME \
   --identity-name $WORKLOAD_IDENTITY_NAME \
   --issuer $AKS_OIDC_ISSUER \
   --subject system:serviceaccount:$NAMESPACE:$WORKLOAD_IDENTITY_NAME \
   --audiences api://AzureADTokenExchange
+
+az identity federated-credential create \
+  --name "aks-sa-keda-operator" \
+  --resource-group $RESOURCE_GROUP_NAME \
+  --identity-name $WORKLOAD_IDENTITY_NAME \
+  --issuer $AKS_OIDC_ISSUER \
+  --subject system:serviceaccount:kube-system:keda-operator \
+  --audiences api://AzureADTokenExchange
 ```
 
-8. Assign workload identity permissions to storage queue:
+8. Assign storage queue permissions:
 
 ```azurecli
 STORAGE_ACCOUNT_ID=$(az storage account show --name $STORAGE_ACCOUNT_NAME --resource-group $RESOURCE_GROUP_NAME --query id -o tsv)
@@ -142,6 +153,12 @@ WORKLOAD_IDENTITY_PRINCIPAL_ID=$(az identity show --name $WORKLOAD_IDENTITY_NAME
 az role assignment create \
   --assignee-object-id $WORKLOAD_IDENTITY_PRINCIPAL_ID \
   --assignee-principal-type "ServicePrincipal" \
+  --role "Storage Queue Data Contributor" \
+  --scope $STORAGE_ACCOUNT_ID
+
+az role assignment create \
+  --assignee-object-id $USER_ID \
+  --assignee-principal-type "User" \
   --role "Storage Queue Data Contributor" \
   --scope $STORAGE_ACCOUNT_ID
 ```
@@ -177,36 +194,40 @@ EOF
 10. Create a KEDA trigger authentication and scaled object for Azure storage queues:
 
 ```azurecli
-SCALING_QUEUE_LENGTH=10
+AUTH_TRIGGER_NAME="azure-queue-auth"
+SCALED_OBJECT_NAME="azure-queue-scaler"
+SCALING_QUEUE_LENGTH="10"
 
 cat <<EOF | kubectl apply -f -
 apiVersion: keda.sh/v1alpha1
 kind: TriggerAuthentication
 metadata:
-  name: azure-queue-auth
+  name: "${AUTH_TRIGGER_NAME}"
+  namespace: "${NAMESPACE}"
 spec:
   podIdentity:
+    identityId: "${WORKLOAD_IDENTITY_CLIENT_ID}"
     provider: azure-workload
 ---
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
 metadata:
-  name: azure-queue-scaler
+  name: "${SCALED_OBJECT_NAME}"
   namespace: "${NAMESPACE}"
 spec:
   scaleTargetRef:
     name: "${DEPLOYMENT_NAME}"
-  pollingInterval: 10    # Default: 30 (seconds)
-  cooldownPeriod: 60     # Default: 300 (seconds)
-  minReplicaCount: 1     # Default: 0
-  maxReplicaCount: 120   # Default: 100
+  pollingInterval: 10
+  cooldownPeriod: 60
+  minReplicaCount: 1
+  maxReplicaCount: 120
   triggers:
   - type: azure-queue
     metadata:
-      accountName: ${STORAGE_ACCOUNT_NAME}"
-      queueName: "${$STORAGE_QUEUE_NAME}"
+      accountName: "${STORAGE_ACCOUNT_NAME}"
+      queueName: "${STORAGE_QUEUE_NAME}"
       queueLength: "${SCALING_QUEUE_LENGTH}"
     authenticationRef:
-      name: queue-queue-auth
+      name: "${AUTH_TRIGGER_NAME}"
 EOF
 ```
