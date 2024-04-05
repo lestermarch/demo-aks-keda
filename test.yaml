@@ -1,0 +1,48 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: "${DEPLOYMENT_NAME}"
+  namespace: "${NAMESPACE}"
+spec:
+  selector:
+    matchLabels:
+      app: "${DEPLOYMENT_NAME}"
+  template:
+    metadata:
+      labels:
+        app: "${DEPLOYMENT_NAME}"
+        azure.workload.identity/use: "true"
+    spec:
+      serviceAccountName: "${WORKLOAD_IDENTITY_NAME}"
+      containers:
+        - name: azure-cli
+          image: mcr.microsoft.com/azure-cli
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              while true; do
+                MESSAGE=$(az storage message get --account-name "${STORAGE_ACCOUNT_NAME}" --account-key "${STORAGE_ACCOUNT_KEY}" --queue-name "${STORAGE_QUEUE_NAME}" --auth-mode "key" --output "json" --only-show-errors)
+                if [ -z "${MESSAGE}" ]; then
+                  echo "No messages found. Sleeping for 10 seconds."
+                  sleep 10s
+                  continue
+                fi
+                MESSAGE_ID=$(echo "${MESSAGE}" | jq -r '.[0].id')
+                MESSAGE_POP_RECEIPT=$(echo "${MESSAGE}" | jq -r '.[0].popReceipt')
+                if [ -n "${MESSAGE_ID}" ] && [ -n "${MESSAGE_POP_RECEIPT}" ]; then
+                  sleep 3s
+                  az storage message delete \
+                    --id "${MESSAGE_ID}" \
+                    --pop-receipt "${MESSAGE_POP_RECEIPT}" \
+                    --account-name "${STORAGE_ACCOUNT_NAME}" \
+                    --account-key "${STORAGE_ACCOUNT_KEY}" \
+                    --queue-name "${STORAGE_QUEUE_NAME}" \
+                    --auth-mode "key" \
+                    --output "none" \
+                    --only-show-errors
+                else
+                  echo "Failed to process message."
+                  sleep 10s
+                fi
+              done

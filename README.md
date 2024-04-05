@@ -2,7 +2,7 @@
 
 Repo to demonstrate Kubernetes Event-Driven Autoscaling (KEDA) with Azure Kubernetes Service.
 
-## Setup
+## Lab Setup
 
 1. Create a resource group:
 
@@ -167,6 +167,7 @@ az role assignment create \
 
 ```azurecli
 DEPLOYMENT_NAME="azure-queue-processor"
+STORAGE_ACCOUNT_KEY=$(az storage account keys list --account-name $STORAGE_ACCOUNT_NAME --resource-group $RESOURCE_GROUP_NAME --query [0].value -o tsv)
 
 cat <<EOF | kubectl apply -f -
 apiVersion: apps/v1
@@ -184,10 +185,22 @@ spec:
         app: "${DEPLOYMENT_NAME}"
         azure.workload.identity/use: "true"
     spec:
-      serviceAccountName: "${WORKLOAD_IDENTITY_NAME}"
       containers:
-      - name: httpd
-        image: httpd
+      - name: azure-cli
+        image: mcr.microsoft.com/azure-cli
+        command: ["/bin/bash", "-c"]
+        args:
+        - |
+          while true; do
+            az storage message get \
+              --account-name "${STORAGE_ACCOUNT_NAME}" \
+              --account-key "${STORAGE_ACCOUNT_KEY}" \
+              --queue-name "${STORAGE_QUEUE_NAME}" \
+              --auth-mode key \
+              --query id \
+              --output tsv \
+              --only-show-errors
+          done
 EOF
 ```
 
@@ -221,6 +234,17 @@ spec:
   cooldownPeriod: 60
   minReplicaCount: 1
   maxReplicaCount: 120
+  advanced:
+    restoreToOriginalReplicaCount: true
+    horizontalPodAutoscalerConfig:
+      name: "${SCALED_OBJECT_NAME}-hpa"
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: 30
+          policies:
+          - type: Percent
+            value: 20
+            periodSeconds: 10
   triggers:
   - type: azure-queue
     metadata:
@@ -229,5 +253,45 @@ spec:
       queueLength: "${SCALING_QUEUE_LENGTH}"
     authenticationRef:
       name: "${AUTH_TRIGGER_NAME}"
+EOF
+```
+
+### Testing
+
+Create a pod to automatically generate Azure Storage Queue messages:
+
+```azurecli
+cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    app: azure-storage-queue-message-generator
+  name: azure-storage-queue-message-generator
+  namespace: "${NAMESPACE}"
+spec:
+  containers:
+  - name: azure-cli
+    image: mcr.microsoft.com/azure-cli
+    command: ["/bin/bash", "-c"]
+    args:
+    - |
+      while true; do
+        MESSAGE_NUMBER=$((20 + RANDOM % 981))
+        MESSAGE_PREFIX=$(echo $MESSAGE_NUMBER | sha256sum | cut -c1-8)
+        for ((i=0; i < $MESSAGE_NUMBER; i++)); do
+          az storage message put \
+            --account-name "${STORAGE_ACCOUNT_NAME}" \
+            --account-key "${STORAGE_ACCOUNT_KEY}" \
+            --queue-name "${STORAGE_QUEUE_NAME}" \
+            --content "$MESSAGE_PREFIX-$i" \
+            --auth-mode "key" \
+            --output "tsv" \
+            --only-show-errors
+        done
+        echo "Posted $MESSAGE_NUMBER messages to $STORAGE_ACCOUNT_NAME/$STORAGE_QUEUE_NAME"
+        echo "Sleeping for 5 minutes"
+        sleep 5m
+      done
 EOF
 ```
