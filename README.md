@@ -36,7 +36,42 @@ az storage queue create \
   --auth-mode "login"
 ```
 
-3. Create an AKS cluster with KEDA enabled:
+3. Create an Azure Container Registry:
+
+```azurecli
+ACR_NAME="acrkedademo$ENTROPY"
+az acr create \
+  --name $ACR_NAME \
+  --location $LOCATION \
+  --resource-group $RESOURCE_GROUP_NAME \
+  --sku "Basic"
+```
+
+4. Assign ACR permissions:
+
+```azurecli
+ACR_ID=$(az acr show --name $ACR_NAME --resource-group $RESOURCE_GROUP_NAME --query id -o tsv)
+USER_ID=$(az ad signed-in-user show --query id -o tsv)
+
+az role assignment create \
+  --assignee-object-id $USER_ID \
+  --assignee-principal-type "User" \
+  --role "AcrPush" \
+  --scope $ACR_ID
+```
+
+5. Build and push the message generator app to ACR
+
+```azurecli
+MESSAGE_GENERATOR_IMAGE_NAME="az-message-generator"
+
+az acr build \
+  --registry $ACR_NAME \
+  --image $MESSAGE_GENERATOR_IMAGE_NAME:{{.Run.ID}} \
+  apps/az-message-generator
+```
+
+4. Create an AKS cluster with KEDA enabled:
 
 ```azurecli
 AKS_CLUSTER_NAME="aks-keda-demo"
@@ -45,6 +80,7 @@ az aks create \
   --name $AKS_CLUSTER_NAME \
   --resource-group $RESOURCE_GROUP_NAME \
   --location $LOCATION \
+  --attach-acr $ACR_ID \
   --disable-local-accounts \
   --enable-aad \
   --enable-addons "azure-keyvault-secrets-provider" \
@@ -68,11 +104,10 @@ az aks create \
   --zones 1 2 3
 ```
 
-4. Assign AKS cluster admin permissions:
+5. Assign AKS cluster admin permissions:
 
 ```azurecli
 AKS_CLUSTER_ID=$(az aks show --name $AKS_CLUSTER_NAME --resource-group $RESOURCE_GROUP_NAME --query id -o tsv)
-USER_ID=$(az ad signed-in-user show --query id -o tsv)
 
 az role assignment create \
   --assignee-object-id $USER_ID \
@@ -81,7 +116,7 @@ az role assignment create \
   --scope $AKS_CLUSTER_ID
 ```
 
-5. Get AKS cluster credentials:
+6. Get AKS cluster credentials:
 
 ```azurecli
 az aks get-credentials \
@@ -89,7 +124,7 @@ az aks get-credentials \
   --resource-group $RESOURCE_GROUP_NAME
 ```
 
-6. Create a namespace:
+7. Create a namespace:
 
 ```azurecli
 NAMESPACE="keda-demo"
@@ -102,7 +137,7 @@ metadata:
 EOF
 ```
 
-7. Create a managed workload identity:
+8. Create a managed workload identity:
 
 ```azurecli
 AKS_OIDC_ISSUER=$(az aks show --name $AKS_CLUSTER_NAME --resource-group $RESOURCE_GROUP_NAME --query "oidcIssuerProfile.issuerUrl" -o tsv)
@@ -144,7 +179,7 @@ az identity federated-credential create \
   --audiences api://AzureADTokenExchange
 ```
 
-8. Assign storage queue permissions:
+9. Assign storage queue permissions:
 
 ```azurecli
 STORAGE_ACCOUNT_ID=$(az storage account show --name $STORAGE_ACCOUNT_NAME --resource-group $RESOURCE_GROUP_NAME --query id -o tsv)
@@ -163,7 +198,7 @@ az role assignment create \
   --scope $STORAGE_ACCOUNT_ID
 ```
 
-9. Create a deployment to scale using KEDA:
+10. Create a deployment to scale using KEDA:
 
 ```azurecli
 DEPLOYMENT_NAME="azure-queue-processor"
@@ -204,7 +239,7 @@ spec:
 EOF
 ```
 
-10. Create a KEDA trigger authentication and scaled object for Azure storage queues:
+11. Create a KEDA trigger authentication and scaled object for Azure storage queues:
 
 ```azurecli
 AUTH_TRIGGER_NAME="azure-queue-auth"
@@ -261,37 +296,32 @@ EOF
 Create a pod to automatically generate Azure Storage Queue messages:
 
 ```azurecli
+ACR_LOGIN_SERVER=$(az acr show --name $ACR_NAME --resource-group $RESOURCE_GROUP_NAME --query loginServer -o tsv)
+MESSAGE_GENERATOR_IMAGE_TAG=$(az acr repository show-tags --name $ACR_NAME --repository $MESSAGE_GENERATOR_IMAGE_NAME --query '[0]' -o tsv)
+MESSAGE_COUNT_PER_MINUTE="20"
+
 cat <<EOF | kubectl apply -f -
 apiVersion: v1
 kind: Pod
 metadata:
   labels:
     app: azure-storage-queue-message-generator
+    azure.workload.identity/use: "true"
   name: azure-storage-queue-message-generator
   namespace: "${NAMESPACE}"
 spec:
+  serviceAccountName: "${WORKLOAD_IDENTITY_NAME}"
   containers:
-  - name: azure-cli
-    image: mcr.microsoft.com/azure-cli
-    command: ["/bin/bash", "-c"]
-    args:
-    - |
-      while true; do
-        MESSAGE_NUMBER=$((20 + RANDOM % 981))
-        MESSAGE_PREFIX=$(echo $MESSAGE_NUMBER | sha256sum | cut -c1-8)
-        for ((i=0; i < $MESSAGE_NUMBER; i++)); do
-          az storage message put \
-            --account-name "${STORAGE_ACCOUNT_NAME}" \
-            --account-key "${STORAGE_ACCOUNT_KEY}" \
-            --queue-name "${STORAGE_QUEUE_NAME}" \
-            --content "$MESSAGE_PREFIX-$i" \
-            --auth-mode "key" \
-            --output "tsv" \
-            --only-show-errors
-        done
-        echo "Posted $MESSAGE_NUMBER messages to $STORAGE_ACCOUNT_NAME/$STORAGE_QUEUE_NAME"
-        echo "Sleeping for 5 minutes"
-        sleep 5m
-      done
+  - name: $MESSAGE_GENERATOR_IMAGE_NAME
+    image: $ACR_LOGIN_SERVER/$MESSAGE_GENERATOR_IMAGE_NAME:$MESSAGE_GENERATOR_IMAGE_TAG
+    env:
+    - name: AZURE_CLIENT_ID
+      value: "${WORKLOAD_IDENTITY_CLIENT_ID}"
+    - name: STORAGE_ACCOUNT_NAME
+      value: "${STORAGE_ACCOUNT_NAME}"
+    - name: STORAGE_QUEUE_NAME
+      value: "${STORAGE_QUEUE_NAME}"
+    - name: MESSAGE_COUNT_PER_MINUTE
+      value: "${MESSAGE_COUNT_PER_MINUTE}"
 EOF
 ```
