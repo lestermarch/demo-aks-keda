@@ -297,8 +297,9 @@ Create a pod to automatically generate Azure Storage Queue messages:
 
 ```azurecli
 ACR_LOGIN_SERVER=$(az acr show --name $ACR_NAME --resource-group $RESOURCE_GROUP_NAME --query loginServer -o tsv)
-MESSAGE_GENERATOR_IMAGE_TAG=$(az acr repository show-tags --name $ACR_NAME --repository $MESSAGE_GENERATOR_IMAGE_NAME --query '[0]' -o tsv)
-MESSAGE_COUNT_PER_MINUTE="20"
+MESSAGE_GENERATOR_IMAGE_TAG=$(az acr repository show-tags --name $ACR_NAME --repository $MESSAGE_GENERATOR_IMAGE_NAME --orderby time_desc --top 1 --query '[0]' -o tsv)
+MESSAGE_COUNT_PER_MINUTE_MAX="256"
+MESSAGE_COUNT_PER_MINUTE_MIN="32"
 
 cat <<EOF | kubectl apply -f -
 apiVersion: v1
@@ -317,11 +318,13 @@ spec:
     env:
     - name: AZURE_CLIENT_ID
       value: "${WORKLOAD_IDENTITY_CLIENT_ID}"
+    - name: MESSAGE_COUNT_PER_MINUTE_MAX
+      value: "${MESSAGE_COUNT_PER_MINUTE_MAX}"
+    - name: MESSAGE_COUNT_PER_MINUTE_MIN
+      value: "${MESSAGE_COUNT_PER_MINUTE_MIN}"
     - name: STORAGE_ACCOUNT_NAME
       value: "${STORAGE_ACCOUNT_NAME}"
     - name: STORAGE_QUEUE_NAME
       value: "${STORAGE_QUEUE_NAME}"
-    - name: MESSAGE_COUNT_PER_MINUTE
-      value: "${MESSAGE_COUNT_PER_MINUTE}"
 EOF
 ```
