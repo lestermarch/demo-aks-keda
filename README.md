@@ -2,7 +2,7 @@
 
 ## Summary
 
-[Kubernetes Event-Drive Autoscaling]((https://keda.sh/)) (KEDA) is a component and extension of [Horizonal Pod Autoscaler](https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/) (HPA) which can be added to any Kubernetes cluster, including [Azure Kubernetes Service](https://learn.microsoft.com/en-us/azure/aks/) (AKS), to reactively scale workloads based on various types of event.
+[Kubernetes Event-Drive Autoscaling](https://keda.sh/) (KEDA) is a component and extension of [Horizonal Pod Autoscaler](https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/) (HPA) which can be added to any Kubernetes cluster, including [Azure Kubernetes Service](https://learn.microsoft.com/en-us/azure/aks/) (AKS), to reactively scale workloads based on various types of event.
 
 ## Lab
 
@@ -14,14 +14,77 @@ This repo guides you though the setup of a lab environment to demonstrate the ut
 - **[Azure Managed Identity](https://learn.microsoft.com/en-us/entra/identity/managed-identities-azure-resources/overview)** - The identity used by the AKS workloads and KEDA operator to authenticate to Azure resources.
 - (_Optional_) **[Azure Log Analytics Workspace](https://learn.microsoft.com/en-us/azure/azure-monitor/logs/log-analytics-workspace-overview)** - The log store used by AKS to enable Container Insights and view real-time workload metrics, including autoscaling behaviour.
 
+### Overview
+
+The objective of this lab is to demonstrate the autoscaling behaviour of KEDA, centered around an Azure storage queue. The queue is [monitored](https://keda.sh/docs/2.13/scalers/azure-storage-queue/) by the KEDA operator within the AKS cluster in order to determine scaling requirements.
+
+To simulate a scalable workload, two apps are created to interact with the Azure storage account queue:
+
+- A _Message Generator_ app will send a random number of messages to an Azure storage queue every 60 seconds. The lower and upper bounds for the number of messages can be set by the `MESSAGE_COUNT_PER_MINUTE_MAX` and `MESSAGE_COUNT_PER_MINUTE_MIN` environment variables.
+- A _Message Processor_ app will receive messages from an Azure storage queue and simulate some amount of processing time. The processing time per message can be set with the `MESSAGE_PROCESSING_SECONDS` environment variable.
+
+The concept here is that the _message generator_ will post batches of messages into the storage queue every 60 seconds. One or more _message processors_ will continually check the queue and retrieve, process, and delete the messages. However, each _message processor_ is only able to process a set number of messages per second, and so the number of _message processors_ will need to scale in order to work through the messages in the storage queue.
+
+The _message generator_ app will be deployed as a Kubernetes pod on the AKS cluster, and use a workload identity to authenticate and post messages to the storage queue every 60 seconds.
+
+The _message processor_  app will be deployed as a Kubernetes deployment on the AKS cluster, and use a workload identity to authenticate and retrieve, process and delete messages as quickly as it can. The deployment will be KEDA-enabled, allowing KEDA to scale the number of pods in the deployment based on the length of the storage queue. In this way, the deployment will effectively scale up and down based on current demand.
+
+#### Examples
+
+The lab can be tuned to simulate a workload by modifying the environment variables for each app.
+
+- Setting the _message generator_ `MESSAGE_COUNT_PER_MINUTE_MAX` to `120` and `MESSAGE_COUNT_PER_MINUTE_MIN` to `12` with the _message processor_ `MESSAGE_PROCESSING_SECONDS` to `10` (6 messages/minute) will demonstrate a moderately scalable workload and should see KEDA scale the _message processor_ deployment between 2 and 20 pods.
+- Setting the _message generator_ `MESSAGE_COUNT_PER_MINUTE_MAX` to `1200` and `MESSAGE_COUNT_PER_MINUTE_MIN` to `120` with the _message processor_ `MESSAGE_PROCESSING_SECONDS` to `10` (6 messages/minute) will demonstrate a highly scalable workload and should see KEDA scale the _message processor_ deployment between 20 and 200 pods.
+
 ### Setup
+
+The following sections walk through the lab setup and configuration. By the end of these steps you should have a fully-functioning lab environment with a simulated workload demonstrating KEDA the autoscaling capability of KEDA.
+
+- [1. Environment](#1-environment)
+  * [1.1. Variables](#11-variables)
+  * [1.2. Resource Group](#12-resource-group)
+- [2. Storage](#2-storage)
+  * [2.1. Variables](#21-variables)
+  * [2.2. Account](#22-account)
+  * [2.3. Queue](#23-queue)
+- [3. Container Registry](#3-container-registry)
+  * [3.1. Variables](#31-variables)
+  * [3.2. Registry](#32-registry)
+- [4. Azure Kubernetes Service](#4-azure-kubernetes-service)
+  * [4.1. Variables](#41-variables)
+  * [4.2. Cluster](#42-cluster)
+  * [4.3. Permissions](#43-permissions)
+- (_Optional_) [5. Monitoring](#optional-5-monitoring)
+  * [5.1. Variables](#51-variables)
+  * [5.2. Workspace](#52-workspace)
+  * [5.3. Container Insights](#53-container-insights)
+- [6. Workload Identity](#6-workload-identity)
+  * [6.1. Variables](#61-variables)
+  * [6.2. Authentication](#62-authentication)
+  * [6.3. AKS Namespace](#63-aks-namespace)
+  * [6.4. Managed Identity](#64-managed-identity)
+  * [6.5. AKS Service Account](#65-aks-service-account)
+  * [6.6. Identity Federation](#66-identity-federation)
+- [7. Permissions](#7-permissions)
+  * [7.1. Variables](#71-variables)
+  * [7.2. Storage Account RBAC](#72-storage-account-rbac)
+  * [7.3. Container Registry RBAC](#73-container-registry-rbac)
+- [8. Applications](#8-applications)
+  * [8.1. Variables](#81-variables)
+  * [8.2. Image Build](#82-image-build)
+- [9. Deployment](#9-deployment)
+  * [9.1. Variables](#91-variables)
+  * [9.2. Deployment](#92-deployment)
+- [10. Load Testing](#10-load-testing)
+  * [10.1. Variables](#101-variables)
+  * [10.2. Testing](#102-testing)
 
 > [!Note]
 > The variables set during setup steps may be referenced by later steps. Take care to ensure these are not lost of overwritten during deployment.
 
 ### 1. Environment
 
-This section 
+In this section you configure a resource group to house the lab resources.
 
 #### 1.1. Variables
 
@@ -45,7 +108,7 @@ az group create \
 
 ### 2. Storage
 
-This section
+In this section you create a storage account and queue to be used by the apps, and monitored by KEDA.
 
 #### 2.1. Variables
 
@@ -88,7 +151,7 @@ az storage queue create \
 
 ### 3. Container Registry
 
-This section
+In this section you create a container registry to build and host the apps ready for deployment into the AKS cluster.
 
 #### 3.1. Variables
 
@@ -116,7 +179,13 @@ az acr create \
 
 ### 4. Azure Kubernetes Service
 
-This section
+In this section you create an AKS cluster to run the apps. There are several notable configuration options:
+
+- `--enable-managed-identity` creates a managed identity for the AKS cluster to enable the use of Azure RBAC to authenticate and authorise the cluster to interface with other Azure resources.
+- `--attach-acr` links the AKS cluster to the container registry and configures the relevant permissions on the container registry for AKS to be able to pull images using its managed identity.
+- `--enable-oidc-issuer` and `--enable-workload-identity` provide the ability for Azure user-assigned managed identities to be federated to AKS service accounts and used by pods. Azure RBAC can then be used to authenticate and authorise pods to interface with other Azure resources.
+- `--enable-keda` provisions the KEDA components into the AKS cluster `kube-system` namespace. This includes the KEDA operator service account which can have an Azure used-assigned managed identity federated to it in order for Azure RBAC to be used to authenticate and authorise KEDA to interface with other Azure resources.
+- `--enable-cluster-autoscaler` along with `--max-count` and `--min-count` allows the AKS cluster nodepool to automatically scale the number of ndoes based on cluster load. If the number of required pods exceeds the current nodepool capacity during the lab, the cluster autoscaling behaviour may be observed.
 
 #### 4.1. Variables
 
@@ -179,7 +248,7 @@ az role assignment create \
 
 ### (Optional) 5. Monitoring
 
-This section
+In this optional section you provision a log analytics workspace and install the monitoring addon for AKS to enable container insights. This is recommended to enable a graphical view into the scaling operations during the lab.
 
 #### 5.1. Variables
 
@@ -201,7 +270,7 @@ az monitor log-analytics workspace create \
   --resource-group $RESOURCE_GROUP_NAME
 ```
 
-#### 5.3. Enable AKS Container Insights
+#### 5.3. Container Insights
 
 ```bash
 LOG_WORKSPACE_ID=$(az monitor log-analytics workspace show --name $LOG_WORKSPACE_NAME --resource-group $RESOURCE_GROUP_NAME --query id -o tsv)
@@ -215,7 +284,10 @@ az aks enable-addons \
 
 ### 6. Workload Identity
 
-This section
+In this section you provision an Azure user-assigned identity and federate it with AKS service accounts including the KEDA operator and workload service account.
+
+> [!Note]
+> For simplicity, a single user-assigned identity is used for both the KEDA operator service account and workload service account (used by both applications). In practice, a separate user-assigned identity should be created and federated with the KEDA operator to delineate the permissions required by KEDA (usually read-only) and the permissions required by workload applications.
 
 #### 6.1. Variables
 
@@ -230,7 +302,7 @@ WORKLOAD_IDENTITY_NAME="uid-aks-keda-demo"
 AKS_OIDC_ISSUER=$(az aks show --name $AKS_CLUSTER_NAME --resource-group $RESOURCE_GROUP_NAME --query "oidcIssuerProfile.issuerUrl" -o tsv)
 ```
 
-#### 6.2. Authenticate
+#### 6.2. Authentication
 
 Get your AKS credentials for authentication:
 
@@ -310,7 +382,7 @@ az identity federated-credential create \
 
 ### 7. Permissions
 
-This section
+In this section you configure Azure RBAC for both the storage account and container registry, assigning permissions both to yourself and also to the user-assigned identity used by both the apps and KEDA operator.
 
 #### 7.1. Variables
 
@@ -356,9 +428,9 @@ az role assignment create \
   --scope $ACR_ID
 ```
 
-### 8. Build Applications
+### 8. Applications
 
-This section
+In this section you use the container registry to build the container images ready for deployment into the AKS cluster.
 
 #### 8.1. Variables
 
@@ -392,7 +464,7 @@ az acr build \
 
 ### 9. Deployment
 
-This section
+In this section you deploy the _message processor_ application as a Kubernetes deployment. KEDA is then configured for this deployment by creating both a trigger authentication and scaled object component.
 
 #### 9.1. Variables
 
@@ -428,23 +500,23 @@ spec:
       app: $DEPLOYMENT_NAME
   template:
     metadata:
-      labels
+      labels:
         app: $DEPLOYMENT_NAME
         azure.workload.identity/use: "true"
     spec:
       serviceAccountName: $WORKLOAD_IDENTITY_NAME
       containers:
       - name: $MESSAGE_PROCESSOR_IMAGE_NAME
-        image: $ACR_LOGIN_SERVER/$MESSAGE_PROCESSOR_IMAGE_NAME:$MESSAGE_PROCESSOR_IMAGE_TAG
+        image: "$ACR_LOGIN_SERVER/$MESSAGE_PROCESSOR_IMAGE_NAME:$MESSAGE_PROCESSOR_IMAGE_TAG"
         env:
         - name: AZURE_CLIENT_ID
-          value: $WORKLOAD_IDENTITY_CLIENT_ID
+          value: "${WORKLOAD_IDENTITY_CLIENT_ID}"
         - name: MESSAGE_PROCESSING_SECONDS
-          value: $MESSAGE_PROCESSING_SECONDS
+          value: "${MESSAGE_PROCESSING_SECONDS}"
         - name: STORAGE_ACCOUNT_NAME
-          value: $STORAGE_ACCOUNT_NAME
+          value: "${STORAGE_ACCOUNT_NAME}"
         - name: STORAGE_QUEUE_NAME
-          value: $STORAGE_QUEUE_NAME
+          value: "${STORAGE_QUEUE_NAME}"
 EOF
 ```
 
@@ -506,7 +578,7 @@ EOF
 
 ### 10. Load Testing
 
-This section
+In this section you deploy the _message generator_ application as a Kubernetes pod to begin load-testing the solution.
 
 #### 10.1. Variables
 
@@ -542,14 +614,37 @@ spec:
     image: $ACR_LOGIN_SERVER/$MESSAGE_GENERATOR_IMAGE_NAME:$MESSAGE_GENERATOR_IMAGE_TAG
     env:
     - name: AZURE_CLIENT_ID
-      value: $WORKLOAD_IDENTITY_CLIENT_ID
+      value: "${WORKLOAD_IDENTITY_CLIENT_ID}"
     - name: MESSAGE_COUNT_PER_MINUTE_MAX
-      value: $MESSAGE_COUNT_PER_MINUTE_MAX
+      value: "${MESSAGE_COUNT_PER_MINUTE_MAX}"
     - name: MESSAGE_COUNT_PER_MINUTE_MIN
-      value: $MESSAGE_COUNT_PER_MINUTE_MIN
+      value: "${MESSAGE_COUNT_PER_MINUTE_MIN}"
     - name: STORAGE_ACCOUNT_NAME
-      value: $STORAGE_ACCOUNT_NAME
+      value: "${STORAGE_ACCOUNT_NAME}"
     - name: STORAGE_QUEUE_NAME
-      value: $STORAGE_QUEUE_NAME
+      value: "${STORAGE_QUEUE_NAME}"
 EOF
 ```
+
+#### 10.3. Monitoring
+
+Monitor the solution natively using `kubectl`:
+
+![image](images/demo-aks-keda-10-3-kubectl-monitoring.png)
+
+> [!Tip]
+> The following commands are used here to monitor activity:
+>
+> - `kubectl logs azure-storage-queue-message-generator -n keda-demo` - View message generation activity.
+> - `kubectl logs azure-queue-processor-{podId} -n keda-demo` - View message processing activity for a single message processor instance.
+> - `kubectl get deployment azure-queue-processor -n keda-demo --watch` - View the change in the number of deployment replicas being managed by KEDA in response to storage queue length.
+
+Monitor the solution using the [k9s](https://k9scli.io/) command-line tool:
+
+![image](images/demo-aks-keda-10-3-k9s-monitoring-creating.png)
+
+![image](images/demo-aks-keda-10-3-k9s-monitoring-terminating.png)
+
+Monitor the solution using container insights (if you followed [step 5](#optional-5-monitoring)):
+
+![image](images/demo-aks-keda-10-3-monitoring-container-insights.png)
