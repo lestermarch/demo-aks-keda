@@ -1,8 +1,14 @@
-# Event-Driven Autoscaling (KEDA) with Azure Kubernetes Service
+# Event-Driven Autoscaling (KEDA) with Azure Kubernetes Service (AKS)
 
 ## Summary
 
 [Kubernetes Event-Drive Autoscaling](https://keda.sh/) (KEDA) is a component and extension of [Horizonal Pod Autoscaler](https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/) (HPA) which can be added to any Kubernetes cluster, including [Azure Kubernetes Service](https://learn.microsoft.com/en-us/azure/aks/) (AKS), to reactively scale workloads based on various types of event.
+
+### Video
+
+The below video provides a very high-level overview and demo of this scenario:
+
+[![Event-Driven Autoscaling (KEDA) with Azure Kubernetes Service (AKS)](https://img.youtube.com/vi/2fhhBBiDoz0/0.jpg)](https://youtu.be/2fhhBBiDoz0)
 
 ## Lab
 
@@ -162,7 +168,7 @@ Set some variables:
 ACR_PREFIX="acrakskedademo"
 
 # Do not modify:
-ACR_NAME="$ACR_PREFIX$ENTROPY
+ACR_NAME="$ACR_PREFIX$ENTROPY"
 ```
 
 #### 3.2. Registry
@@ -492,22 +498,22 @@ cat <<EOF | kubectl apply -f -
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: $DEPLOYMENT_NAME
-  namespace: $NAMESPACE
+  name: "${DEPLOYMENT_NAME}"
+  namespace: "${NAMESPACE}"
 spec:
   selector:
     matchLabels:
-      app: $DEPLOYMENT_NAME
+      app: "${DEPLOYMENT_NAME}"
   template:
     metadata:
       labels:
-        app: $DEPLOYMENT_NAME
+        app: "${DEPLOYMENT_NAME}"
         azure.workload.identity/use: "true"
     spec:
-      serviceAccountName: $WORKLOAD_IDENTITY_NAME
+      serviceAccountName: "${WORKLOAD_IDENTITY_NAME}"
       containers:
-      - name: $MESSAGE_PROCESSOR_IMAGE_NAME
-        image: "$ACR_LOGIN_SERVER/$MESSAGE_PROCESSOR_IMAGE_NAME:$MESSAGE_PROCESSOR_IMAGE_TAG"
+      - name: "${MESSAGE_PROCESSOR_IMAGE_NAME}"
+        image: "${ACR_LOGIN_SERVER}/${MESSAGE_PROCESSOR_IMAGE_NAME}:${MESSAGE_PROCESSOR_IMAGE_TAG}"
         env:
         - name: AZURE_CLIENT_ID
           value: "${WORKLOAD_IDENTITY_CLIENT_ID}"
@@ -529,11 +535,11 @@ cat <<EOF | kubectl apply -f -
 apiVersion: keda.sh/v1alpha1
 kind: TriggerAuthentication
 metadata:
-  name: $AUTH_TRIGGER_NAME
-  namespace: $NAMESPACE
+  name: "${AUTH_TRIGGER_NAME}"
+  namespace: "${NAMESPACE}"
 spec:
   podIdentity:
-    identityId: $WORKLOAD_IDENTITY_CLIENT_ID
+    identityId: "${WORKLOAD_IDENTITY_CLIENT_ID}"
     provider: azure-workload
 EOF
 ```
@@ -545,34 +551,34 @@ cat <<EOF | kubectl apply -f -
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
 metadata:
-  name: $SCALED_OBJECT_NAME
-  namespace: $NAMESPACE
+  name: "${SCALED_OBJECT_NAME}"
+  namespace: "${NAMESPACE}"
 spec:
   scaleTargetRef:
-    name: $DEPLOYMENT_NAME
+    name: "${DEPLOYMENT_NAME}"
   pollingInterval: 10
   cooldownPeriod: 60
   minReplicaCount: 1
-  maxReplicaCount: 120
+  maxReplicaCount: 250
   advanced:
     restoreToOriginalReplicaCount: true
     horizontalPodAutoscalerConfig:
-      name: $SCALED_OBJECT_NAME-hpa"
+      name: "${SCALED_OBJECT_NAME}-hpa"
       behavior:
         scaleDown:
           stabilizationWindowSeconds: 30
           policies:
           - type: Percent
-            value: 20
+            value: 100
             periodSeconds: 10
   triggers:
   - type: azure-queue
     metadata:
-      accountName: $STORAGE_ACCOUNT_NAME
-      queueName: $STORAGE_QUEUE_NAME
-      queueLength: $SCALING_QUEUE_LENGTH
+      accountName: "${STORAGE_ACCOUNT_NAME}"
+      queueName: "${STORAGE_QUEUE_NAME}"
+      queueLength: "${SCALING_QUEUE_LENGTH}"
     authenticationRef:
-      name: $AUTH_TRIGGER_NAME
+      name: "${AUTH_TRIGGER_NAME}"
 EOF
 ```
 
